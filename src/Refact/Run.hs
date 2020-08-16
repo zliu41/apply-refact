@@ -59,9 +59,7 @@ refactMain :: IO ()
 refactMain = do
   o@Options{..} <- execParser optionsWithHelp
   when optionsVersion (putStr ("v" ++ showVersion version) >> exitSuccess)
-  unless (isJust optionsTarget || isJust optionsRefactFile)
-    (error "Must specify either the target file or the refact file")
-  case optionsTarget of
+  case targetFile optionsInput of
     Nothing ->
       withTempFile $ \fp -> do
         getContents >>= writeFileUTF8 fp
@@ -91,9 +89,15 @@ parsePos s =
 
 data Target = StdIn | File FilePath
 
+data Input = Input
+  { targetFile :: Maybe FilePath
+  -- ^ Where to process hints
+  , refactFile :: Maybe FilePath
+  -- ^ The refactorings to process
+  }
+
 data Options = Options
-  { optionsTarget   :: Maybe FilePath -- ^ Where to process hints
-  , optionsRefactFile :: Maybe FilePath -- ^ The refactorings to process
+  { optionsInput :: Input
   , optionsInplace  :: Bool
   , optionsOutput   :: Maybe FilePath -- ^ Whether to overwrite the file inplace
   , optionsVerbosity :: Verbosity
@@ -105,14 +109,25 @@ data Options = Options
   , optionsPos     :: Maybe (Int, Int)
   }
 
+inputParser :: Parser Input
+inputParser = parserRefact <|> parserTarget
+  where
+    parserTarget = do
+      targetFile <- Just <$> argument str (metavar "TARGET")
+      refactFile <- option (Just <$> str) (refactMod <> value Nothing)
+      pure Input{..}
+    parserRefact = do
+      targetFile <- optional (argument str (metavar "TARGET"))
+      refactFile <- Just <$> strOption refactMod
+      pure Input{..}
+    refactMod = mconcat
+      [ long "refact-file"
+      , help "A file which specifies which refactorings to perform"
+      ]
+
 options :: Parser Options
 options = do
-  optionsTarget <- optional (argument str (metavar "TARGET"))
-  optionsRefactFile <- option (Just <$> str) $ mconcat
-    [ long "refact-file"
-    , value Nothing
-    , help "A file which specifies which refactorings to perform"
-    ]
+  optionsInput <- inputParser
   optionsInplace <- switch $ mconcat
     [ long "inplace"
     , short 'i'
@@ -238,7 +253,7 @@ parseModuleWithArgs exts fp = EP.ghcWrapper $ do
 runPipe :: Options -> FilePath  -> IO ()
 runPipe Options{..} file = do
   let verb = optionsVerbosity
-  rawhints <- getHints optionsRefactFile
+  rawhints <- getHints (refactFile optionsInput)
   when (verb == Loud) (traceM "Got raw hints")
   let inp :: [(String, [Refactoring R.SrcSpan])] = read rawhints
       n = length inp
@@ -251,7 +266,7 @@ runPipe Options{..} file = do
     when optionsDebug (putStrLn (showAnnData as 0 m))
     apply optionsPos optionsStep inp file verb as m
 
-  if optionsInplace && isJust optionsTarget
+  if optionsInplace && isJust (targetFile optionsInput)
     then writeFileUTF8 file output
     else case optionsOutput of
           Nothing -> putStr output
